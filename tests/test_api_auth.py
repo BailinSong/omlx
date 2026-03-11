@@ -168,6 +168,22 @@ class TestSubKeyVerification:
             _server_state.api_key = original_key
             _server_state.global_settings = original_gs
 
+    def test_x_api_key_header_accepted(self):
+        """Test that x-api-key header value is accepted for API authentication."""
+        from omlx.server import verify_api_key, _server_state
+        import asyncio
+
+        original_key = _server_state.api_key
+        _server_state.api_key = "main-key"
+
+        try:
+            result = asyncio.run(
+                verify_api_key(credentials=None, x_api_key="main-key")
+            )
+            assert result is True
+        finally:
+            _server_state.api_key = original_key
+
 
 class TestSkipApiKeyVerification:
     """Tests for skip_api_key_verification feature."""

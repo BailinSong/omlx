@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Union
 
-from fastapi import Depends, FastAPI, HTTPException, Request as FastAPIRequest
+from fastapi import Depends, FastAPI, Header, HTTPException, Request as FastAPIRequest
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
@@ -216,6 +216,7 @@ def get_mcp_manager():
 
 async def verify_api_key(
     credentials: HTTPAuthorizationCredentials = Depends(security),
+    x_api_key: str | None = Header(default=None, alias="x-api-key"),
 ) -> bool:
     """Verify API key if configured.
 
@@ -235,8 +236,11 @@ async def verify_api_key(
     ):
         return True
 
-    # Check if credentials provided
-    if credentials is None:
+    # Accept API key from Authorization: Bearer <key> or x-api-key header.
+    provided_key = credentials.credentials if credentials is not None else x_api_key
+
+    # Check if key provided
+    if provided_key is None:
         raise HTTPException(status_code=401, detail="API key required")
 
     # Check main key and sub keys
@@ -245,9 +249,7 @@ async def verify_api_key(
         if _server_state.global_settings is not None
         else []
     )
-    if not verify_any_api_key(
-        credentials.credentials, _server_state.api_key, sub_keys
-    ):
+    if not verify_any_api_key(provided_key, _server_state.api_key, sub_keys):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     return True
@@ -421,11 +423,36 @@ class DebugRequestLoggingMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if (
-            scope["type"] != "http"
-            or not logger.isEnabledFor(5)
-            or scope.get("method") != "POST"
-        ):
+        if scope["type"] != "http" or not logger.isEnabledFor(5):
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "UNKNOWN")
+        path = scope.get("path", "")
+
+        # Convert ASGI headers [(bytes, bytes), ...] to JSON-serializable mapping.
+        headers: dict[str, str | list[str]] = {}
+        for key_bytes, value_bytes in scope.get("headers", []):
+            key = key_bytes.decode("latin-1")
+            value = value_bytes.decode("latin-1")
+            if key in headers:
+                existing = headers[key]
+                if isinstance(existing, list):
+                    existing.append(value)
+                else:
+                    headers[key] = [existing, value]
+            else:
+                headers[key] = value
+
+        # For non-POST requests, log headers without touching the body stream.
+        if method != "POST":
+            logger.log(
+                5,
+                "Incoming %s %s — headers: %s",
+                method,
+                path,
+                json.dumps(headers, ensure_ascii=False),
+            )
             await self.app(scope, receive, send)
             return
 
@@ -440,9 +467,10 @@ class DebugRequestLoggingMiddleware:
         body = b"".join(part.get("body", b"") for part in body_parts)
         logger.log(
             5,
-            "Incoming %s %s — body: %s",
-            scope["method"],
-            scope["path"],
+            "Incoming %s %s — headers: %s — body: %s",
+            method,
+            path,
+            json.dumps(headers, ensure_ascii=False),
             body.decode("utf-8", errors="replace"),
         )
 
